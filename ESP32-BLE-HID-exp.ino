@@ -73,7 +73,6 @@ typedef struct __attribute__((packed)) {
 typedef struct {
   uint8_t report[32];
   size_t report_len;
-  uint32_t last_millis = 0;
   bool isNotify;
   bool available;
 } Report_xfer_state_t;
@@ -168,6 +167,7 @@ class ClientCallbacks : public NimBLEClientCallbacks {
 
   /** Pairing process complete, we can check the results in ble_gap_conn_desc */
   void onAuthenticationComplete(ble_gap_conn_desc* desc){
+    DBG_println(__func__);
     if(!desc->sec_state.encrypted) {
       DBG_println("Encrypt connection failed - disconnecting");
       /** Find the client with the connection handle provided in desc */
@@ -214,7 +214,6 @@ void notifyCB(NimBLERemoteCharacteristic* pRemoteCharacteristic,
     Report_xfer.report_len = length;
     memcpy((void *)Report_xfer.report, pData, min(length, sizeof(Report_xfer.report)));
     Report_xfer.available = true;
-    Report_xfer.last_millis = millis();
   }
 }
 
@@ -304,12 +303,12 @@ bool connectToServer()
   DBG_print("RSSI: ");
   DBG_println(pClient->getRssi());
 
+#if DEV_INFO_SERVICE
   /** Now we can read/write/subscribe the charateristics of the services we are interested in */
   NimBLERemoteService* pSvc = nullptr;
   NimBLERemoteCharacteristic* pChr = nullptr;
   NimBLERemoteDescriptor* pDsc = nullptr;
 
-#if DEV_INFO_SERVICE
   // Device Information Service
   pSvc = pClient->getService(DEVICE_INFORMATION_SERVICE);
   if(pSvc) {     /** make sure it's not null */
@@ -344,63 +343,45 @@ bool connectToServer()
   }
 #endif
 
-  pSvc = pClient->getService(HID_SERVICE);
-  if(pSvc) {     /** make sure it's not null */
-      // This returns the HID report descriptor like this
-      // HID_REPORT_MAP 0x2a4b Value: 5,1,9,2,A1,1,9,1,A1,0,5,9,19,1,29,5,15,0,25,1,75,1,
-      // Copy and paste the value digits to http://eleccelerator.com/usbdescreqparser/
-      // to see the decoded report descriptor.
-      pChr = pSvc->getCharacteristic(HID_REPORT_MAP);
-      if(pChr) {     /** make sure it's not null */
-        if(pChr->canRead()) {
-          std::string value = pChr->readValue();
-          if (!reconnected) {
-#if DUMP_REPORT_MAP
-          DBG_print("HID_REPORT_MAP ");
-          DBG_print(pChr->getUUID().toString().c_str());
-          DBG_print(" Value: ");
-          uint8_t *p = (uint8_t *)value.data();
-          for (size_t i = 0; i < value.length(); i++) {
-            DBG_print(p[i], HEX);
-            DBG_print(',');
-          }
-          DBG_println();
-#endif
-          }
-        }
-      }
-      else {
-        DBG_println("HID REPORT MAP char not found.");
-      }
-
-    // Subscribe to characteristics HID_REPORT_DATA.
-    // One real device reports 2 with the same UUID but
-    // different handles. Using getCharacteristic() results
-    // in subscribing to only one.
+  std::vector<NimBLERemoteService*>*servicevector;
+  servicevector = pClient->getServices(true);
+  if (servicevector->empty()) {
+    DBG_println("Empty services vector");
+  }
+  // For each service
+  for (auto &pSvc: *servicevector) {
+    DBG_println(pSvc->toString().c_str());
     std::vector<NimBLERemoteCharacteristic*>*charvector;
     charvector = pSvc->getCharacteristics(true);
+    // For each characteristic
     for (auto &it: *charvector) {
-      if (it->getUUID() == NimBLEUUID(HID_REPORT_DATA)) {
-        DBG_println(it->toString().c_str());
-        if (it->canNotify()) {
-          if(it->subscribe(true, notifyCB)) {
-            DBG_println("subscribe notification OK");
-          } else {
-            /** Disconnect if subscribe failed */
-            DBG_println("subscribe notification failed");
-            pClient->disconnect();
-            return false;
-          }
+      DBG_print(it->toString().c_str());
+      // If readable, show the value
+      if (it->canRead()) {
+        std::string value = it->readValue();
+        printHex(value.data(), value.length());
+        DBG_println();
+      }
+      // If notify, subscribe
+      if (it->canNotify()) {
+        if(it->subscribe(true, notifyCB)) {
+          DBG_println("subscribe notification OK");
+        } else {
+          /** Disconnect if subscribe failed */
+          DBG_println("subscribe notification failed");
+          pClient->disconnect();
+          return false;
         }
-        if (it->canIndicate()) {
-          if(it->subscribe(false, notifyCB)) {
-            DBG_println("subscribe indication OK");
-          } else {
-            /** Disconnect if subscribe failed */
-            DBG_println("subscribe indication failed");
-            pClient->disconnect();
-            return false;
-          }
+      }
+      // If indicate, subscribe
+      if (it->canIndicate()) {
+        if(it->subscribe(false, notifyCB)) {
+          DBG_println("subscribe indication OK");
+        } else {
+          /** Disconnect if subscribe failed */
+          DBG_println("subscribe indication failed");
+          pClient->disconnect();
+          return false;
         }
       }
     }
@@ -495,5 +476,12 @@ void loop () {
     }
 #endif
     Report_xfer.available = false;
+  }
+}
+
+void printHex(const void *p, size_t length) {
+  const uint8_t *data = (uint8_t *)p;
+  for (size_t i = 0; i < length; i++) {
+    DBG_printf(" %02x", data[i]);
   }
 }
